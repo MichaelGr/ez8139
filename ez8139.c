@@ -31,13 +31,13 @@ static DEFINE_PCI_DEVICE_TABLE(ez8139_pci_tbl) = {
 
 static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	printk(KERN_ALERT "A pci device for ez8139 probed\n");
+	printk(KERN_INFO "A pci device for ez8139 probed\n");
 	return 0;
 }
 
 static void ez8139_remove(struct pci_dev *pdev)
 {
-	printk(KERN_ALERT "A pci device for ez8139 is being removed\n");
+	printk(KERN_INFO "A pci device for ez8139 is being removed\n");
 }
 
 static struct pci_driver ez8139_pci = {
@@ -50,14 +50,14 @@ static struct pci_driver ez8139_pci = {
 static int __init ez8139_init(void) 
 {
 	int ret = pci_register_driver(&ez8139_pci);
-	printk(KERN_ALERT "ez8139 driver registered in pci subsystem!\n");
+	printk(KERN_INFO "ez8139 driver registered in pci subsystem!\n");
 	return ret;
 }
 
 static void __exit ez8139_exit(void) 
 {
 	pci_unregister_driver(&ez8139_pci);
-	printk(KERN_ALERT "ez8139 driver unregistered from pci subsystem...\n");
+	printk(KERN_INFO "ez8139 driver unregistered from pci subsystem...\n");
 }
 
 module_init(ez8139_init);
