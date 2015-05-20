@@ -2,7 +2,11 @@ Hello,
 
 ez8139 is a simpler version of RTL8139 ethernet driver in Linux (in 8139cp.c file). I am writing it as an educational piece of code to learn device driver concepts. Things like PCI interface, DMA access, address spaces etc.
 
-It will be simpler since it will only work in x86_64 for QEMU and code for extra stuff like WOL, eeprom programming etc. won't be included.
+It will be simpler since it will only work in x86_64 for QEMU and code for extra stuff like WOL, eeprom programming, ACPI etc. won't be included.
+
+List of features that won't be implemented:
+* PCI hotplugging
+* Power management
 
 I am still learning device drivers and kernel in general so there will be errors on my side. Please contact me if you think something is wrong with the code.
 
