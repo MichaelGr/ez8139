@@ -23,6 +23,11 @@
 #include <linux/byteorder/generic.h> //for le to cpu conversions
 
 #define DRV_NAME "ez8139"
+#define PRINT_DEV_LOC " rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn)
+
+struct ez8139_priv {
+    void __iomem *regs; //regs addr in kernel's virtual address space (mapped from IO addr space)
+};
 
 static int init_pci_regs(struct pci_dev *pdev);	//initialize PCI dev ready for device register IO
 static void pci_regs_test(void __iomem *regs);	//test PCI register access on device
@@ -31,22 +36,24 @@ static void deinit_pci_regs(struct pci_dev *pdev);	//free regions and disable th
 
 static int init_pci_regs(struct pci_dev *pdev)
 {
+	struct ez8139_priv *priv;
 	resource_size_t pci_regs;	//offset of device register addresses in IO addr space
-	void __iomem *regs;		//regs addr in kernel's virtual address space (mapped from IO addr space)
 
 	int ret;
+
+	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
 
 	//enable the pci device for use
 	ret = pci_enable_device(pdev);
 	if (ret) {
-		printk(KERN_ALERT "Could not enable rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn));
+		printk(KERN_ALERT "Could not enable" PRINT_DEV_LOC);
 		return ret;
 	}
 
 	//register the regions in all BARs to this driver
 	ret = pci_request_regions(pdev, DRV_NAME);
 	if (ret) { //this may will if a driver for rtl8139 took the device but did not release regions yet.
-		printk("Unable to register PCI regions for rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn));
+		printk("Unable to register PCI regions for" PRINT_DEV_LOC);
 		pci_disable_device(pdev);
 		return ret; 
 	}
@@ -55,7 +62,7 @@ static int init_pci_regs(struct pci_dev *pdev)
 	pci_regs = pci_resource_start(pdev,1);
 	if (!pci_regs)
 	{
-		printk("Unable to access IO registers over PCI for rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn));
+		printk("Unable to access IO registers over PCI for" PRINT_DEV_LOC);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		return -EIO;
@@ -63,16 +70,15 @@ static int init_pci_regs(struct pci_dev *pdev)
 
 	//we are going to access device registers over mmap'd IO (MMIO).
 	//Basically we are mapping CPU's IO address space to kernel's virtual address space (because Intel CPU's work that way)
-	regs = ioremap(pci_regs, pci_resource_len(pdev,1)); //map a chunk of IO addr space as big as device's registers (known to PCI) to virt addr space
-	if (!regs)
+	priv->regs = ioremap(pci_regs, pci_resource_len(pdev,1)); //map a chunk of IO addr space as big as device's registers (known to PCI) to virt addr space
+	if (!priv->regs)
 	{
-		printk("Unable to map IO registers to virt addr space for rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn));
+		printk("Unable to map IO registers to virt addr space for" PRINT_DEV_LOC);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		return -EIO;
 	}
 
-	pci_regs_test(regs);
 
 	return 0;
 }
@@ -109,7 +115,7 @@ static void pci_regs_test(void __iomem *regs)
 
 static void deinit_pci_regs(struct pci_dev *pdev)
 {
-	printk("Releasing IO regions and disabling the rtl8139 device on pci bus %d pci slot %d.\n", pdev->bus->number, PCI_SLOT(pdev->devfn));
+	printk("Releasing IO regions and disabling the" PRINT_DEV_LOC);
 	pci_release_regions(pdev); //release the mmap'd region so that another driver can use it if necessary.
 	pci_disable_device(pdev);
 }
@@ -117,18 +123,40 @@ static void deinit_pci_regs(struct pci_dev *pdev)
 static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret;
+	struct ez8139_priv *priv;
 
 	printk(KERN_INFO "A pci device for ez8139 probed\n");
 
+	priv = (struct ez8139_priv*) kmalloc(sizeof(struct ez8139_priv), GFP_KERNEL);
+	if(!priv)
+	{
+		printk("Unable to allocate kernel mem for" PRINT_DEV_LOC);
+		return -ENOMEM;
+	}
+	pci_set_drvdata(pdev, priv); //set pdev's priv
+	printk(KERN_DEBUG "private section is allocated at %p for rtl8139 device on pci bus %d pci slot %d.\n", \
+								priv, pdev->bus->number, PCI_SLOT(pdev->devfn)); 
+
 	ret = init_pci_regs(pdev);
+	if(!ret)
+	{
+		kfree(pci_get_drvdata(pdev));
+	}
+
+	pci_regs_test(priv->regs); //test if device registers are accessible
 
 	return ret;
 }
 
 static void ez8139_remove(struct pci_dev *pdev)
 {
+	struct ez8139_priv *priv;
+	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
+
 	printk(KERN_INFO "A pci device for ez8139 is being removed\n");
 	deinit_pci_regs(pdev);
+	kfree(pci_get_drvdata(pdev));
+	return;
 }
 
 static DEFINE_PCI_DEVICE_TABLE(ez8139_pci_tbl) = {
