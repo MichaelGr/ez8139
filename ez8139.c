@@ -52,7 +52,7 @@ static int init_pci_regs(struct pci_dev *pdev)
 
 	//register the regions in all BARs to this driver
 	ret = pci_request_regions(pdev, DRV_NAME);
-	if (ret) { //this may will if a driver for rtl8139 took the device but did not release regions yet.
+	if (ret) { //this may fail if a driver for rtl8139 took the device but did not release regions yet.
 		printk("Unable to register PCI regions for" PRINT_DEV_LOC);
 		pci_disable_device(pdev);
 		return ret; 
@@ -69,7 +69,7 @@ static int init_pci_regs(struct pci_dev *pdev)
 	}
 
 	//we are going to access device registers over mmap'd IO (MMIO).
-	//Basically we are mapping CPU's IO address space to kernel's virtual address space (because Intel CPU's work that way)
+	//basically we are mapping CPU's IO address space to kernel's virtual address space (because Intel CPU's work that way)
 	priv->regs = ioremap(pci_regs, pci_resource_len(pdev,1)); //map a chunk of IO addr space as big as device's registers (known to PCI) to virt addr space
 	if (!priv->regs)
 	{
@@ -78,7 +78,6 @@ static int init_pci_regs(struct pci_dev *pdev)
 		pci_disable_device(pdev);
 		return -EIO;
 	}
-
 
 	return 0;
 }
@@ -138,7 +137,7 @@ static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 								priv, pdev->bus->number, PCI_SLOT(pdev->devfn)); 
 
 	ret = init_pci_regs(pdev);
-	if(!ret)
+	if(ret)
 	{
 		kfree(pci_get_drvdata(pdev));
 	}
