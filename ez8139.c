@@ -19,7 +19,10 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 
-#include <linux/pci.h>
+#include <linux/pci.h> //for pci device
+#include <linux/etherdevice.h> //for net device
+#include <linux/interrupt.h> //interrupt handling
+
 #include <linux/byteorder/generic.h> //for le to cpu conversions
 #include <linux/delay.h> //to be able to wait
 #include <linux/proc_fs.h> //to interact with userspace
@@ -50,15 +53,20 @@
 #define TALLY_DUMP_SIZE 64 	//size of tally dump
 				//(its contents are in ch6.3 (DTCCR) in datasheet)
 
-struct ez8139_priv {
+struct ez8139_pci_priv {
 	void __iomem *regs; 	//regs addr in kernel's virtual address space
 				//(mapped from IO addr space)
 	dma_addr_t tally_dump_bus; //the address we will tell the bus
 	void *tally_dump_virt; //the address we will use as CPU
 };
 
+struct ez8139_net_priv {
+	struct net_device *dev;
+	struct pci_dev *pdev;
+};
+
 static int init_pci_regs(struct pci_dev *pdev);	//initialize PCI dev for device register IO
-static void pci_regs_test(void __iomem *regs);	//test PCI register access on device
+static u64 pci_regs_test(void __iomem *regs);	//test PCI register access on device
 
 static void deinit_pci_regs(struct pci_dev *pdev); //free regions and disable the device
 
@@ -66,12 +74,12 @@ static int init_pci_dma(struct pci_dev *pdev); //init DMA
 
 static int init_pci_regs(struct pci_dev *pdev)
 {
-	struct ez8139_priv *priv;
+	struct ez8139_pci_priv *pp;
 	resource_size_t pci_regs; //offset of device register addresses in IO addr space
 
 	int ret;
 
-	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
+	pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
 
 	//enable the pci device for use
 	ret = pci_enable_device(pdev);
@@ -103,11 +111,11 @@ static int init_pci_regs(struct pci_dev *pdev)
 	//we are going to access device registers over mmap'd IO (MMIO).
 	//basically we are mapping CPU's IO address space to kernel's virtual address space (because Intel CPU's work that way)
 
-	priv->regs = ioremap(pci_regs, pci_resource_len(pdev,1));
+	pp->regs = ioremap(pci_regs, pci_resource_len(pdev,1));
 	//map a chunk of IO addr space as big as device's registers (known to PCI)
 	//to virt addr space
 
-	if (!priv->regs)
+	if (!pp->regs)
 	{
 		printk("Unable to map IO registers to virt addr space for" PRINT_DEV_LOC);
 		pci_release_regions(pdev);
@@ -118,7 +126,7 @@ static int init_pci_regs(struct pci_dev *pdev)
 	return 0;
 }
 
-static void pci_regs_test(void __iomem *regs)
+static u64 pci_regs_test(void __iomem *regs)
 {
 	u32 mac1, mac2;
 	u64 mac_whole;
@@ -137,6 +145,8 @@ static void pci_regs_test(void __iomem *regs)
 	mac_whole = ((u64) mac2 << 32) | mac1;
 	printk(KERN_INFO "Complete MAC address read from io regs is %pM - translated\n", \
 			&mac_whole);
+
+	return mac_whole;
 }
 
 static void deinit_pci_regs(struct pci_dev *pdev)
@@ -151,10 +161,10 @@ static int init_pci_dma(struct pci_dev *pdev)
 {
 	u16 cmdregval;
 	int rc;
-	struct ez8139_priv *priv;
-	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
+	struct ez8139_pci_priv *pp;
+	pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
 
-	printk(KERN_DEBUG "priv section is at %p\n", priv);
+	printk(KERN_DEBUG "priv section is at %p\n", pp);
 
 	pci_set_mwi(pdev); //set mwi bit in command register
 	//9.13.3 in datasheet
@@ -168,8 +178,8 @@ static int init_pci_dma(struct pci_dev *pdev)
 	if(rc) printk (KERN_ALERT "Unable to set DMA mask to 64" PRINT_DEV_LOC);
 
 	//not sure if Linux cares about DAC, setting it nevertheless
-	iowrite16(DAC_BIT, priv->regs + (CPCR));
-	cmdregval = ioread16(priv->regs + (CPCR));
+	iowrite16(DAC_BIT, pp->regs + (CPCR));
+	cmdregval = ioread16(pp->regs + (CPCR));
 	printk(KERN_INFO "C+ command reg value after setting DAC: %x\n", cmdregval);
 
 	pci_set_master(pdev);	//enable bus mastering for device and
@@ -177,13 +187,13 @@ static int init_pci_dma(struct pci_dev *pdev)
 				//linux only sets latency timer to 64 or 255 I understand?
 
 	//we won't write anything, but since dma_alloc_coherent is so easy ...
-	priv->tally_dump_virt = dma_alloc_coherent(&pdev->dev, TALLY_DUMP_SIZE, &priv->tally_dump_bus, GFP_KERNEL);
+	pp->tally_dump_virt = dma_alloc_coherent(&pdev->dev, TALLY_DUMP_SIZE, &pp->tally_dump_bus, GFP_KERNEL);
 	/*	pdev->dev - this is the device struct kernel knows
 	 *	TALLY_DUMP_SIZE (64) - size of tally dump - still takes up one page :(
-	 *	&priv->tally_dump_bus - allocated addr translated for bus,
+	 *	&pp->tally_dump_bus - allocated addr translated for bus,
 	 *				will be filled by this function
 	 */
-	printk(KERN_INFO "I registered %p for tally dump ops\n", priv->tally_dump_virt);
+	printk(KERN_INFO "I registered %p for tally dump ops\n", pp->tally_dump_virt);
 
 	return 0;
 }
@@ -214,7 +224,7 @@ static int open_dma_test_entry(struct inode *inode, struct file *file)
 	int slot_num = 0;
 	int i;
 
-	struct ez8139_priv *priv;
+	struct ez8139_pci_priv *pp;
 
 	printk(KERN_INFO "proc entry %s is being read\n", file->f_dentry->d_name.name);
 
@@ -232,14 +242,14 @@ static int open_dma_test_entry(struct inode *inode, struct file *file)
 		return -EFAULT;
 	}
 
-	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
+	pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
 
-	iowrite32(priv->tally_dump_bus >> 32, priv->regs + DTCCR + 4);
-	iowrite32((priv->tally_dump_bus & DMA_BIT_MASK(32)) | DTCCR_CMD_BIT, \
-			priv->regs + DTCCR); //mark 4th bit to command dumping to the addr
+	iowrite32(pp->tally_dump_bus >> 32, pp->regs + DTCCR + 4);
+	iowrite32((pp->tally_dump_bus & DMA_BIT_MASK(32)) | DTCCR_CMD_BIT, \
+			pp->regs + DTCCR); //mark 4th bit to command dumping to the addr
 
 	for(i=0;i<1000;i++) {
-		if((ioread32(priv->regs + DTCCR) & DTCCR_CMD_BIT) == 0)
+		if((ioread32(pp->regs + DTCCR) & DTCCR_CMD_BIT) == 0)
 		{
 			printk(KERN_INFO "got DTCCR_CMD_BIT back to 0 again\n");
 			break;
@@ -247,12 +257,12 @@ static int open_dma_test_entry(struct inode *inode, struct file *file)
 		udelay(10);
 	}
 
-	if(ioread32(priv->regs + DTCCR) & DTCCR_CMD_BIT) {
+	if(ioread32(pp->regs + DTCCR) & DTCCR_CMD_BIT) {
 		printk(KERN_ALERT "waited for 1 sec but no result :(\n");
 		return -EFAULT;
 	}
 
-	return single_open(file, show_dma_test_entry, priv->tally_dump_virt);
+	return single_open(file, show_dma_test_entry, pp->tally_dump_virt);
 }
 
 static int close_dma_test_entry(struct inode *inode, struct file *file)
@@ -293,23 +303,83 @@ static struct proc_dir_entry* create_dma_test_entry(struct pci_dev *pdev)
 	return new_dma_test_entry;
 }
 
+static irqreturn_t ez8139_interrupt(int irq, void *dev_instance)
+{
+	struct ez8139_net_priv *np = netdev_priv((struct net_device *) dev_instance);
+	struct pci_dev *pdev = np->pdev;
+
+	//TODO: handle interrupt and schedule related bottom half tasklet
+
+	printk(KERN_DEBUG "Got interrupt on" PRINT_DEV_LOC);
+
+	return IRQ_RETVAL(1);
+}
+
+static int ez8139_open(struct net_device *dev)
+{
+	struct ez8139_net_priv *np = netdev_priv(dev);
+	struct pci_dev *pdev = np->pdev;
+	const int irq = pdev->irq;
+	int ret;
+
+	printk(KERN_DEBUG "Setting up" PRINT_DEV_LOC);
+	printk(KERN_DEBUG "It is supposed to be on irq line %d on pci\n", irq);
+
+	ret = request_irq(irq, ez8139_interrupt, IRQF_SHARED, dev->name, dev);
+	//TODO: why are we setting device name?
+
+	if(ret) printk(KERN_ALERT "failed to register irq\n");
+
+	return ret;
+}
+
+static int ez8139_stop(struct net_device *dev)
+{
+	struct ez8139_net_priv *np = netdev_priv(dev);
+	struct pci_dev *pdev = np->pdev;
+
+	printk(KERN_DEBUG "Setting down" PRINT_DEV_LOC);
+
+	free_irq(np->pdev->irq, dev);
+
+	return 0;
+}
+
+static netdev_tx_t ez8139_tx_start(struct sk_buff *skb, struct net_device *dev)
+{
+	struct ez8139_net_priv *np = netdev_priv(dev);
+	struct pci_dev *pdev = np->pdev;
+
+	printk(KERN_DEBUG "Got packet to trasmit for" PRINT_DEV_LOC);
+
+	return NETDEV_TX_OK;
+}
+
+static struct net_device_ops ez8139_ndo = {
+	.ndo_open = ez8139_open,
+	.ndo_stop = ez8139_stop,
+	.ndo_start_xmit = ez8139_tx_start,
+};
+
 static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret;
-	struct ez8139_priv *priv;
+	struct ez8139_pci_priv *pp;
+	struct net_device *dev;
+	struct ez8139_net_priv *np;
+	u64 dev_mac;
 
 	printk(KERN_INFO "A pci device for ez8139 probed\n");
 
-	priv = (struct ez8139_priv*) kmalloc(sizeof(struct ez8139_priv), GFP_KERNEL);
-	if(!priv)
-	{
+	pp = (struct ez8139_pci_priv*) kmalloc(sizeof(struct ez8139_pci_priv), GFP_KERNEL);
+	if(!pp)	{
 		printk("Unable to allocate kernel mem for" PRINT_DEV_LOC);
 		return -ENOMEM;
 	}
-	pci_set_drvdata(pdev, priv); //set pdev's priv
+	pci_set_drvdata(pdev, pp); //set pdev's priv
 	printk(KERN_DEBUG "private section is allocated at %p \
 			for rtl8139 device on pci bus %d pci slot %d.\n", \
-			priv, pdev->bus->number, PCI_SLOT(pdev->devfn));
+			pp, pdev->bus->number, PCI_SLOT(pdev->devfn));
 
 	ret = init_pci_regs(pdev);
 	if(ret)
@@ -317,17 +387,39 @@ static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		kfree(pci_get_drvdata(pdev));
 	}
 
-	pci_regs_test(priv->regs); //test if device registers are accessible
+	dev_mac = pci_regs_test(pp->regs); //get mac to test if device registers are accessible
 
 	init_pci_dma(pdev);
 
 	create_dma_test_entry(pdev); //no problem if fails
 
+	//create netdev
+	dev = alloc_etherdev(sizeof(struct ez8139_net_priv));
+	if(!dev) {
+		printk("Unable to allocate kernel mem for" PRINT_DEV_LOC);
+		return -ENOMEM;
+	}
+
+	//let pci device know the net device
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	np = netdev_priv(dev);
+
+	np->pdev = pdev;
+	np->dev = dev;
+
+	dev->netdev_ops = &ez8139_ndo;
+	dev->destructor = free_netdev;
+
+	memcpy(dev->dev_addr, &dev_mac, 6);
+
+	ret = register_netdev(dev);
+
 	//TODO: need to write a function like cp_init_hw in the original driver
 	//we need to reset and re-configure the device
 
 	//In QEMU this is enough to see packets coming to the device	
-	iowrite8(CMD_TX_EN_BIT | CMD_RX_EN_BIT, priv->regs + CMDR);
+	iowrite8(CMD_TX_EN_BIT | CMD_RX_EN_BIT, pp->regs + CMDR);
 	//write 1 to read & write enable pins in normal cmd reg
 
 	return ret;
@@ -336,14 +428,15 @@ static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 static void ez8139_remove(struct pci_dev *pdev)
 {
 	char entry_name[18];
-	struct ez8139_priv *priv;
-	priv = (struct ez8139_priv *) pci_get_drvdata(pdev);
+	struct ez8139_pci_priv *pp;
+	pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
+
 
 	snprintf(entry_name, 18, "dma_test_p%d_s%d", \
 			pdev->bus->number, PCI_SLOT(pdev->devfn));
 	remove_proc_entry(entry_name, NULL);
 
-	dma_free_coherent(&pdev->dev, TALLY_DUMP_SIZE, priv->tally_dump_virt, priv->tally_dump_bus);
+	dma_free_coherent(&pdev->dev, TALLY_DUMP_SIZE, pp->tally_dump_virt, pp->tally_dump_bus);
 
 	printk(KERN_INFO "A pci device for ez8139 is being removed\n");
 	deinit_pci_regs(pdev);
