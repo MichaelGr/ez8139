@@ -36,6 +36,9 @@
 #define CPCR 0xE0 //c+ mode command register
 #define CMDR 0x37 //normal command register
 #define DTCCR 0x10 //tally dump registers, 8 bytes long
+#define IMR 0x3C //interrupt mask registers, 2 bytes long
+#define ISR 0x3E //interrupt status registers, 2 bytes long
+#define RCR 0x44 //Rx config registers, 4 bytes long
 
 //various bit values
 #define DAC_BIT (1<<4) //DAC bit in C+ command register
@@ -47,6 +50,11 @@
 #define CMD_RX_EN_BIT (1<<3) //enable RX in command register
 #define CP_TX_EN_BIT 1 //enable TX in C+ mode
 #define CP_RX_EN_BIT (1<<1) //enable RX in C+ mode
+#define ISR_ROK 1 //raised if "new packet received" interrupt is issued (RX OK)
+#define IMR_ROK 1 //mask "new packet received" interrupt
+#define RCR_AB (1<<3) //accept broadcast packets
+#define RCR_APM (1<<1) //accept packets with matching destination MAC address
+#define RCR_AALL 0x3F //accept all packets
 
 
 //some sizes
@@ -159,7 +167,7 @@ static void deinit_pci_regs(struct pci_dev *pdev)
 
 static int init_pci_dma(struct pci_dev *pdev)
 {
-	u16 cmdregval;
+	u16 cmd_reg;
 	int rc;
 	struct ez8139_pci_priv *pp;
 	pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
@@ -178,9 +186,10 @@ static int init_pci_dma(struct pci_dev *pdev)
 	if(rc) printk (KERN_ALERT "Unable to set DMA mask to 64" PRINT_DEV_LOC);
 
 	//not sure if Linux cares about DAC, setting it nevertheless
-	iowrite16(DAC_BIT, pp->regs + (CPCR));
-	cmdregval = ioread16(pp->regs + (CPCR));
-	printk(KERN_INFO "C+ command reg value after setting DAC: %x\n", cmdregval);
+	cmd_reg = ioread16(pp->regs + (CPCR));
+	iowrite16(cmd_reg | DAC_BIT, pp->regs + (CPCR));
+	cmd_reg = ioread16(pp->regs + (CPCR));
+	printk(KERN_INFO "C+ command reg value after setting DAC: %x\n", cmd_reg);
 
 	pci_set_master(pdev);	//enable bus mastering for device and
 				//read and set again latency timer
@@ -307,29 +316,55 @@ static irqreturn_t ez8139_interrupt(int irq, void *dev_instance)
 {
 	struct ez8139_net_priv *np = netdev_priv((struct net_device *) dev_instance);
 	struct pci_dev *pdev = np->pdev;
+	struct ez8139_pci_priv *pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
+	u16 isr_reg = 0;
 
 	//TODO: handle interrupt and schedule related bottom half tasklet
 
 	printk(KERN_DEBUG "Got interrupt on" PRINT_DEV_LOC);
 
-	return IRQ_RETVAL(1);
+	isr_reg = ioread16(pp->regs + ISR);
+	printk(KERN_DEBUG "Status of the ISR: %d\n", isr_reg);
+	if(isr_reg & ISR_ROK) {
+		iowrite16(isr_reg | ISR_ROK, pp->regs + ISR); //setting the bit makes it reset
+		printk(KERN_DEBUG "Handled rx interrupt on" PRINT_DEV_LOC);
+		return IRQ_HANDLED;
+	} else {
+		printk(KERN_DEBUG "Umm, it was not for" PRINT_DEV_LOC);
+		return IRQ_NONE;
+	}
 }
 
 static int ez8139_open(struct net_device *dev)
 {
 	struct ez8139_net_priv *np = netdev_priv(dev);
 	struct pci_dev *pdev = np->pdev;
+	struct ez8139_pci_priv *pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
 	const int irq = pdev->irq;
+	u16 imr_reg = 0;
+	u8 cp_reg = 0;
+	u8 cmd_reg = 0;
 	int ret;
 
 	printk(KERN_DEBUG "Setting up" PRINT_DEV_LOC);
 	printk(KERN_DEBUG "It is supposed to be on irq line %d on pci\n", irq);
 
 	ret = request_irq(irq, ez8139_interrupt, IRQF_SHARED, dev->name, dev);
-	//TODO: why are we setting device name?
 
-	if(ret) printk(KERN_ALERT "failed to register irq\n");
+	if(!ret) {
+		imr_reg = ioread16(pp->regs + IMR);
+		iowrite16(imr_reg | IMR_ROK, pp->regs + IMR); //send us an interrupt when Rx successful
+	} else
+		printk(KERN_ALERT "failed to register on irq line %d\n", irq);
 
+	cp_reg = ioread8(pp->regs + CPCR);
+	cmd_reg = ioread8(pp->regs + CMDR);
+	iowrite8(cp_reg | CP_TX_EN_BIT | CP_RX_EN_BIT, pp->regs + CPCR);
+	iowrite8(cp_reg | CMD_TX_EN_BIT | CMD_RX_EN_BIT, pp->regs + CMDR);
+	//set read & write enable pins in normal cmd reg
+	iowrite32(ioread32(pp->regs + RCR) | RCR_AALL, pp->regs + RCR);
+
+	//TODO: return necessary error code on problem
 	return ret;
 }
 
@@ -337,10 +372,23 @@ static int ez8139_stop(struct net_device *dev)
 {
 	struct ez8139_net_priv *np = netdev_priv(dev);
 	struct pci_dev *pdev = np->pdev;
+	struct ez8139_pci_priv *pp = (struct ez8139_pci_priv *) pci_get_drvdata(pdev);
+	u16 imr_reg = 0;
+	u8 cp_reg = 0;
+	u8 cmd_reg = 0;
 
 	printk(KERN_DEBUG "Setting down" PRINT_DEV_LOC);
 
+	//TODO: first check if irq is registered successfully
 	free_irq(np->pdev->irq, dev);
+
+	imr_reg = ioread16(pp->regs + IMR);
+	iowrite16(imr_reg & ~IMR_ROK, pp->regs + IMR); //mask out Rx OK interrupts
+
+	cp_reg = ioread8(pp->regs + CPCR);
+	cmd_reg = ioread8(pp->regs + CMDR);
+	iowrite8(cp_reg & ~(CP_TX_EN_BIT | CP_RX_EN_BIT), pp->regs + CPCR);
+	iowrite8(cp_reg & ~(CMD_TX_EN_BIT | CMD_RX_EN_BIT), pp->regs + CMDR);
 
 	return 0;
 }
@@ -417,10 +465,6 @@ static int ez8139_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	//TODO: need to write a function like cp_init_hw in the original driver
 	//we need to reset and re-configure the device
-
-	//In QEMU this is enough to see packets coming to the device	
-	iowrite8(CMD_TX_EN_BIT | CMD_RX_EN_BIT, pp->regs + CMDR);
-	//write 1 to read & write enable pins in normal cmd reg
 
 	return ret;
 }
